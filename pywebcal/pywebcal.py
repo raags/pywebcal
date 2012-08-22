@@ -22,6 +22,7 @@ import datetime
 import logging
 import pickle
 import hashlib
+import urllib2
 from os import path, environ
 
 try:
@@ -41,78 +42,49 @@ vobject on http://vobject.skyhouseconsulting.com/. Or install it with
 `easy_install vobject`"""
     sys.exit(1)
 
-try:
-    from webdav.WebdavClient import CollectionStorer,ResourceStorer
-except ImportError:
-    print """You miss dependencies for running this library. Please
-install python webdav library (https://code.launchpad.net/python-webdav-lib/)"""
-    sys.exit(1)
 
 class WebCal(object):
     """
-    Class providing simple cached access to iCal calendars over WebDAV
+    Class providing simple cached access to iCal calendars over Http
 
     """
     _cache_file = '%s/.pywebcal.cache' % environ['HOME']
 
-    def __init__(self, webdavURL, username = None, password = None):
-        """webdavURL - URL of webdav calendar. For example
+    def __init__(self, URL, username = None, password = None):
+        """URL - URL of webcal calendar. For example
                     http://www.google.com/calendar/ical/9e11j73ff4pdomjlort7v10h640okf47%40import.calendar.google.com/public/basic.ics
         username - provide username in case it is needed
         password - password to access calendar
         """
-        self._webdavURL = webdavURL
+        self._URL = URL
         self._username = username
         self._password = password
         self.connection = None
-        self._modifiedTimes = {}
+        self._modifiedTime = None
         self._cache = None
-        self._connID = ConnID(webdavURL, username)
+        self._connID = ConnID(URL, username)
         self._cache_file = "%s.%s" % (self._cache_file, self._connID.digest)
 
-    def get_calendar_uids(self):
-        """get_calendar_uids() -> [uid, uid1, ...]
+    def get_calendar(self):
+        """get_calendar() -> ICal
 
-        Returns list of calendar UIDs in collection. If the webdav URL
-        points to single iCal file, list with one UID 0 is returned
+        Returns Calendar instance from URL
         """
         if not self.connection:
             self._connect()
-        if type(self.connection) == ResourceStorer:
-            self._modifiedTimes[0] = datetime.datetime.now(gettz())
-            return [0]
-        resources = self.connection.listResources()
-        ret = []
-        for k in resources.keys():
-            fname = k.rpartition('/')[2]
-            ret.append(fname)
-            tm = resources[k].getLastModified()
-            self._modifiedTimes[fname] = datetime.datetime(tm.tm_year, tm.tm_mon, tm.tm_mday,
-                                                           tm.tm_hour, tm.tm_min, tm.tm_sec, 0,
-                                                           gettz("UTC"))
-        return ret
-
-    def get_calendar(self, uid):
-        """get_calendar(uid) -> ICal
-
-        Returns Calendar instance from webdav URL identified by uid.
-        """
-        if not self.connection:
-            self._connect()
-        if uid == 0:
-            rs = self.connection
-        else:
-            rs = self.connection.getResourceStorer(uid)
-        modified = self._modifiedTimes[uid]
-        cc = self.__get_cached_calendar(uid)
-        if cc and cc[0] == modified: # calendar is cached
-            data = cc[1]
+            self._modifiedTime = datetime.datetime.now(gettz())
+        
+        modified = self._modifiedTime
+        cc = self.__get_cached_calendar()
+        
+        if cc and cc['modified'] > modified + datetime.timedelta(hours=12): # cache is only valid for 12 hours
+            data = cc['data']
             vcal = vobject.base.readComponents(StringIO.StringIO(data[0])).next()
             c = ICal(vcal)
         else:
-            vcal = vobject.base.readComponents(rs.downloadContent().read()).next()
+            vcal = vcal = vobject.base.readComponents(self.connection.read()).next()  ## read from http url
             c = ICal(vcal)
-            self.__set_cached_calendar(uid, modified, (vcal.serialize(),))
+            self.__set_cached_calendar(modified, (vcal.serialize(),))
         return c
 
     def get_all_events(self):
@@ -122,38 +94,35 @@ class WebCal(object):
         if not self.connection:
             self._connect()
         events = []
-        for calid in self.get_calendar_uids():
-            cal = self.get_calendar(caldid)
-            events.extend(cal.get_events())
-        return ret
+        
+        cal = self.get_calendar()
+        events.extend(cal.get_events())
+        return events
 
     def _connect(self):
-        if self._webdavURL[-4:] == '.ics':
-            self.connection = ResourceStorer(self._webdavURL, validateResourceNames=False)
-        else:
-            self.connection = CollectionStorer(self._webdavURL, validateResourceNames=False)
+       
+        self.connection = urllib2.urlopen(self._URL)
+        # TODO: add auth
+        #if self._username and self._password:
+        #    self.connection.connection.addBasicAuthorization(self._username, self._password)
 
-        if self._username and self._password:
-            self.connection.connection.addBasicAuthorization(self._username, self._password)
-
-        self.connection.connection.logger.setLevel(logging.WARNING)
-
-    def __set_cached_calendar(self, uid, modified, data):
+    def __set_cached_calendar(self, modified, data):
         if not self._cache:
             self.__load_cache()
 
-        if self._cache.has_key(uid) and self._cache[uid][0] == modified:
+        if self._cache and self._cache['modified'] > modified + datetime.timedelta(hours=12):
             return
 
-        self._cache[uid] = (modified, data)
+        self._cache['modified'] = modified
+	self._cache['data'] = data
         self.__save_cache()
 
-    def __get_cached_calendar(self, uid):
+    def __get_cached_calendar(self):
         if not self._cache:
             self.__load_cache()
 
-        if self._cache and self._cache.has_key(uid):
-            return self._cache[uid]
+        if self._cache:
+            return self._cache
         else:
             return None
 
@@ -161,12 +130,14 @@ class WebCal(object):
         if not path.isfile(self._cache_file) or path.getsize(self._cache_file) == 0:
             self._cache = {}
             return
+
         with open(self._cache_file, 'r') as cacheFile:
             self._cache = pickle.load(cacheFile)
 
     def __save_cache(self):
         with open(self._cache_file, 'w') as cacheFile:
             pickle.dump(self._cache, cacheFile)
+
 
 class ICal(object):
     """High-level interface for working with iCal files"""
