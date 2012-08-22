@@ -56,11 +56,11 @@ class WebCal(object):
         username - provide username in case it is needed
         password - password to access calendar
         """
+
         self._URL = URL
         self._username = username
         self._password = password
         self.connection = None
-        self._modifiedTime = None
         self._cache = None
         self._connID = ConnID(URL, username)
         self._cache_file = "%s.%s" % (self._cache_file, self._connID.digest)
@@ -70,21 +70,19 @@ class WebCal(object):
 
         Returns Calendar instance from URL
         """
-        if not self.connection:
-            self._connect()
-            self._modifiedTime = datetime.datetime.now(gettz())
-        
-        modified = self._modifiedTime
+	now = datetime.datetime.now(gettz())	
+
         cc = self.__get_cached_calendar()
         
-        if cc and cc['modified'] > modified + datetime.timedelta(hours=12): # cache is only valid for 12 hours
+        if cc and now < (cc['modified'] + datetime.timedelta(hours=12)): # cache is only valid for 12 hours
             data = cc['data']
             vcal = vobject.base.readComponents(StringIO.StringIO(data[0])).next()
             c = ICal(vcal)
         else:
-            vcal = vcal = vobject.base.readComponents(self.connection.read()).next()  ## read from http url
+	    self._connect()
+            vcal = vobject.base.readComponents(self.connection.read()).next()  ## read from http url
             c = ICal(vcal)
-            self.__set_cached_calendar(modified, (vcal.serialize(),))
+            self.__set_cached_calendar(now, (vcal.serialize(),))
         return c
 
     def get_all_events(self):
@@ -109,9 +107,6 @@ class WebCal(object):
     def __set_cached_calendar(self, modified, data):
         if not self._cache:
             self.__load_cache()
-
-        if self._cache and self._cache['modified'] > modified + datetime.timedelta(hours=12):
-            return
 
         self._cache['modified'] = modified
 	self._cache['data'] = data
